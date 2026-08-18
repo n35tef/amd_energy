@@ -74,16 +74,22 @@ static int amd_energy_read_labels(struct device *dev,
 	return 0;
 }
 
-static void get_energy_units(struct amd_energy_data *data)
+static int get_energy_units(struct amd_energy_data *data)
 {
 	u64 rapl_units;
+	int ret;
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(6, 16, 0)
-	rdmsrl_safe(ENERGY_PWR_UNIT_MSR, &rapl_units);
+	ret = rdmsrl_safe(ENERGY_PWR_UNIT_MSR, &rapl_units);
 #else
-	rdmsrq_safe(ENERGY_PWR_UNIT_MSR, &rapl_units);
+	ret = rdmsrq_safe(ENERGY_PWR_UNIT_MSR, &rapl_units);
 #endif
+	/* MSR is unavailable (e.g. under QEMU without RAPL emulation) */
+	if (ret)
+		return ret;
+
 	data->energy_units = (rapl_units & AMD_ENERGY_UNIT_MASK) >> 8;
+	return 0;
 }
 
 static void accumulate_delta(struct amd_energy_data *data,
@@ -318,18 +324,27 @@ static int amd_energy_probe(struct platform_device *pdev)
 	data->info[0] = &data->energy_info;
 	ret = amd_create_sensor(dev, data, hwmon_energy,
 				HWMON_E_INPUT | HWMON_E_LABEL);
-	if (ret)
+	if (ret) {
+		dev_err(dev, "Failed to create sensors: %d\n", ret);
 		return ret;
+	}
 
 	mutex_init(&data->lock);
-	get_energy_units(data);
+	ret = get_energy_units(data);
+	if (ret) {
+		dev_err(dev, "Failed to read energy unit MSR: %d\n", ret);
+		return ret;
+	}
 
 	hwmon_dev = devm_hwmon_device_register_with_info(dev, DRVNAME,
 							 data,
 							 &data->chip,
 							 NULL);
-	if (IS_ERR(hwmon_dev))
+	if (IS_ERR(hwmon_dev)) {
+		dev_err(dev, "Failed to register hwmon device: %ld\n",
+			PTR_ERR(hwmon_dev));
 		return PTR_ERR(hwmon_dev);
+	}
 
 	/*
 	 * On a system with peak wattage of 250W
